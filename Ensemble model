@@ -1,0 +1,238 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+import os
+
+results_dict = {}  # Dictionary to collect predictions for all targets
+
+print("Script started...")
+
+# --- Set Data Directory ---
+data_dir = r"C:\Users\gayat\OneDrive\Desktop\PV project\DataSet_PLEIAData\Forecasting\DataSet_PLEIAData"
+
+
+
+
+# --- Load Data ---
+cons_A = pd.read_csv(os.path.join(data_dir, "Consumption_A.csv"), parse_dates=['Date'])
+cons_B = pd.read_csv(os.path.join(data_dir, "Consumption_B.csv"), parse_dates=['Date'])
+cons_C = pd.read_csv(os.path.join(data_dir, "Consumption_C.csv"), parse_dates=['Date'])
+temp_1 = pd.read_csv(os.path.join(data_dir, "temp_sensor1.csv"), parse_dates=['Date'])
+temp_2 = pd.read_csv(os.path.join(data_dir, "temp_sensor2.csv"), parse_dates=['Date'])
+temp_3 = pd.read_csv(os.path.join(data_dir, "temp_sensor3.csv"), parse_dates=['Date'])
+weather = pd.read_csv(os.path.join(data_dir, "weather data.csv"), parse_dates=['Date'])
+co2 = pd.read_csv(os.path.join(data_dir, "co2_data.csv"), parse_dates=['Date'])
+
+# --- Resample Helper ---
+def resample_df(df, col, new_col):
+    df['Date'] = pd.to_datetime(df['Date'], format='mixed', utc=True)
+    df = df.set_index('Date').resample('60min').mean()
+    return df.rename(columns={col: new_col})
+
+# --- Resample and Rename ---
+cons_A = resample_df(cons_A, 'dif_cons_real', 'consumption_A')
+cons_B = resample_df(cons_B, 'dif_cons_real', 'consumption_B')
+cons_C = resample_df(cons_C, 'dif_cons_real', 'consumption_C')
+temp_1 = resample_df(temp_1, 'V2', 'temp_sensor_1')
+temp_2 = resample_df(temp_2, 'V2', 'temp_sensor_2')
+temp_3 = resample_df(temp_3, 'V2', 'temp_sensor_3')
+weather['Date'] = pd.to_datetime(weather['Date'], format='mixed', utc=True)
+weather = weather.set_index('Date').resample('60min').mean()
+co2 = resample_df(co2, 'V17', 'CO2_ppm')
+
+# --- Merge All Data ---
+data = pd.concat([cons_A, cons_B, cons_C, temp_1, temp_2, temp_3, weather, co2], axis=1).dropna().reset_index()
+
+# --- Feature Engineering ---
+data['total_consumption'] = data[['consumption_A', 'consumption_B', 'consumption_C']].sum(axis=1)
+data['average_temperature'] = data[['temp_sensor_1', 'temp_sensor_2', 'temp_sensor_3']].mean(axis=1)
+data['average_humidity'] = data['hrmed']
+data['hour'] = data['Date'].dt.hour
+data['dayofweek'] = data['Date'].dt.dayofweek
+data['month'] = data['Date'].dt.month
+data['hour_sin'] = np.sin(2 * np.pi * data['hour'] / 24)
+data['hour_cos'] = np.cos(2 * np.pi * data['hour'] / 24)
+
+# --- Targets ---
+target_cols = ['total_consumption', 'average_temperature', 'average_humidity']
+target_cols_extended = target_cols + ['CO2_ppm']
+
+# --- Lag & Rolling Features ---
+for target in target_cols_extended:
+    for lag in [1, 2, 6, 12, 24]:
+        data[f'{target}_lag{lag}'] = data[target].shift(lag)
+    data[f'{target}_roll6'] = data[target].rolling(6).mean()
+    data[f'{target}_roll12'] = data[target].rolling(12).mean()
+
+data = data.dropna().reset_index(drop=True)
+
+# --- Ensemble Model Function ---
+def run_ensemble(target_col):
+    print(f"\n🔧 Running models for: {target_col}")
+
+    exclude = ['Date', 'index'] + target_cols_extended
+    features = [col for col in data.columns if col not in exclude]
+    X = data[features]
+    y = data[target_col]
+
+    split = int(0.8 * len(data))
+    X_train, X_test = X.iloc[:split], X.iloc[split:]
+    y_train, y_test = y.iloc[:split], y.iloc[split:]
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    rf = RandomForestRegressor(n_estimators=100, random_state=42)
+    xgb = XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=6, random_state=42)
+    lin = LinearRegression()
+
+    rf.fit(X_train_scaled, y_train)
+    xgb.fit(X_train_scaled, y_train)
+    lin.fit(X_train_scaled, y_train)
+
+    y_pred_train = 0.35 * rf.predict(X_train_scaled) + 0.4 * xgb.predict(X_train_scaled) + 0.25 * lin.predict(X_train_scaled)
+    y_pred_test = 0.35 * rf.predict(X_test_scaled) + 0.4 * xgb.predict(X_test_scaled) + 0.25 * lin.predict(X_test_scaled)
+
+    # Results
+    print(f"Training Results - RMSE: {np.sqrt(mean_squared_error(y_train, y_pred_train)):.4f}, R²: {r2_score(y_train, y_pred_train):.4f}, MAE: {mean_absolute_error(y_train, y_pred_train):.4f}")
+    print(f"Testing Results - RMSE: {np.sqrt(mean_squared_error(y_test, y_pred_test)):.4f}, R²: {r2_score(y_test, y_pred_test):.4f}, MAE: {mean_absolute_error(y_test, y_pred_test):.4f}")
+    print(f"Training MSE: {mean_squared_error(y_train, y_pred_train):.4f}")
+    print(f"Testing MSE: {mean_squared_error(y_test, y_pred_test):.4f}")
+
+    results_dict[target_col] = (y_test.reset_index(drop=True), pd.Series(y_pred_test))
+
+
+
+# --- Combined Plot Function (4 Colors) ---
+def plot_combined_graphs(y_test_temp, y_pred_temp, y_test_humidity, y_pred_humidity, y_test_co2, y_pred_co2, y_test_total_consumption, y_pred_total_consumption):
+    plt.figure(figsize=(14, 7))
+
+    # Plot for Temperature and Humidity - Actual vs Predicted
+    plt.plot(y_test_temp, label='Actual Temperature', color='blue')  # Actual Temp
+    plt.plot(y_pred_temp, label='Predicted Temperature', linestyle='--', color='lightblue')  # Predicted Temp
+    plt.plot(y_test_humidity, label='Actual Humidity', color='green')  # Actual Humidity
+    plt.plot(y_pred_humidity, label='Predicted Humidity', linestyle='--', color='lightgreen')  # Predicted Humidity
+    plt.title('Temperature and Humidity - Actual vs Predicted')
+    plt.xlabel('Time')
+    plt.ylabel('Temperature / Humidity')
+    plt.legend()
+    plt.grid(True)
+
+    # Plot for CO2 and Total Consumption - Actual vs Predicted
+    plt.figure(figsize=(14, 7))
+    plt.plot(y_test_co2, label='Actual CO2', color='red')  # Actual CO2
+    plt.plot(y_pred_co2, label='Predicted CO2', linestyle='--', color='pink')  # Predicted CO2
+    plt.plot(y_test_total_consumption, label='Actual Total Consumption', color='orange')  # Actual Consumption
+    plt.plot(y_pred_total_consumption, label='Predicted Total Consumption', linestyle='--', color='yellow')  # Predicted Consumption
+    plt.title('CO2 and Total Consumption - Actual vs Predicted')
+    plt.xlabel('Time')
+    plt.ylabel('CO2 / Total Consumption')
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.savefig("combined_temperature_humidity_co2_total_consumption.png")
+    plt.show()
+
+def plot_temp_and_humidity(results_dict):
+    temp_actual, temp_pred = results_dict['average_temperature']
+    hum_actual, hum_pred = results_dict['average_humidity']
+
+    plt.figure(figsize=(14, 7))
+
+    # Temperature
+    plt.plot(temp_actual.values, label='Actual Temperature', color='blue')
+    plt.plot(temp_pred.values, label='Predicted Temperature', linestyle='--', color='lightblue')
+
+    # Humidity
+    plt.plot(hum_actual.values, label='Actual Humidity', color='green')
+    plt.plot(hum_pred.values, label='Predicted Humidity', linestyle='--', color='lightgreen')
+
+    plt.title("Actual vs Predicted - Temperature & Humidity")
+    plt.xlabel("Time Index")
+    plt.ylabel("Value")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    os.makedirs("output_graphs", exist_ok=True)
+    plt.savefig("output_graphs/temp_humidity_combined.png")
+    plt.show()
+
+def plot_consumption_and_co2_dual_axis(results_dict):
+    cons_actual, cons_pred = results_dict['total_consumption']
+    co2_actual, co2_pred = results_dict['CO2_ppm']
+
+    fig, ax1 = plt.subplots(figsize=(14, 6))
+
+    # Left Y-axis: Consumption
+    ax1.plot(cons_actual.values, label='Actual Consumption', color='orange')
+    ax1.plot(cons_pred.values, label='Predicted Consumption', linestyle='--', color='gold')
+    ax1.set_ylabel('Consumption', color='orange')
+    ax1.tick_params(axis='y', labelcolor='orange')
+
+    # Right Y-axis: CO2
+    ax2 = ax1.twinx()
+    ax2.plot(co2_actual.values, label='Actual CO₂', color='red')
+    ax2.plot(co2_pred.values, label='Predicted CO₂', linestyle='--', color='pink')
+    ax2.set_ylabel('CO₂ ppm', color='red')
+    ax2.tick_params(axis='y', labelcolor='red')
+
+    # Title and legend
+    plt.title("Actual vs Predicted - Consumption & CO₂ (Dual Axis)")
+    fig.tight_layout()
+    fig.legend(loc='upper left', bbox_to_anchor=(0.1, 0.9))
+    os.makedirs("output_graphs", exist_ok=True)
+    plt.savefig("output_graphs/consumption_co2_dual_axis.png")
+    plt.show()
+
+
+# --- Run For All Targets ---
+for target in target_cols_extended:
+    run_ensemble(target)
+
+
+def plot_all_targets_together(results_dict):
+    import matplotlib.pyplot as plt
+
+    # Define color pairs for each target: (actual, predicted)
+    color_map = {
+        'total_consumption': ('orange', 'gold'),
+        'average_temperature': ('blue', 'lightblue'),
+        'average_humidity': ('green', 'lightgreen'),
+        'CO2_ppm': ('red', 'pink'),
+    }
+
+    plt.figure(figsize=(16, 10))
+
+    for target, (actual, predicted) in results_dict.items():
+        c1, c2 = color_map.get(target, ('black', 'gray'))
+        plt.plot(actual.values, label=f'Actual {target}', color=c1)
+        plt.plot(predicted.values, label=f'Predicted {target}', linestyle='--', color=c2)
+
+    plt.title(' Actual vs Predicted - All Targets in One Plot')
+    plt.xlabel('Time Index')
+    plt.ylabel('Value')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    os.makedirs("output_graphs", exist_ok=True)
+    plt.savefig("output_graphs/all_targets_combined_plot.png")
+    plt.show()
+
+# --- Run For All Targets ---
+for target in target_cols_extended:
+    run_ensemble(target)
+
+# --- Now plot everything
+plot_all_targets_together(results_dict)
+plot_temp_and_humidity(results_dict)
+plot_consumption_and_co2_dual_axis(results_dict)
+
+    
+
