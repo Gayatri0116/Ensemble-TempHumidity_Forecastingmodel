@@ -66,7 +66,30 @@ The model forecasts the following key environmental and energy metrics:
  Dataset Citation
 
 > A. Martínez Ibarra, A. González-Vidal, and A. Skarmeta,  
-> *"PLEIAData: Consumption, HVAC, Temperature, Weather and Motion Sensor Data for Smart Buildings"*,  
+> *"PLEIAData: Consumption, HVAC, Temperature, Weather and Motion Sensor Data for Smart Buildings"*,
+
+➡️ Dataset must be manually downloaded and placed in a folder in the above google drive link
+
+## 🛠️ How to Run
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/Gayatri0116/Ensemble-TempHumidity_Forecastingmodel.git
+cd Ensemble-TempHumidity_Forecastingmodel
+
+# 2. (Optional) Create a virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# 3. Install required libraries
+pandas
+numpy
+matplotlib
+scikit-learn
+xgboost
+
+# 4. Run the script
+python ensembke.py
 
 
 
